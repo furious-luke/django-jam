@@ -30,8 +30,8 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('apps', metavar='A', nargs='+', help='apps to dump')
-        parser.add_argument('--api-output', '-o', default='../frontend/api', help='output prefix')
-        parser.add_argument('--model-output', '-n', default='../frontend/models', help='output prefix')
+        parser.add_argument('--api-output', '-o', default='.', help='output prefix')
+        parser.add_argument('--model-output', '-n', default='.', help='output prefix')
         parser.add_argument('--api-prefix', '-a', default='/api/v1', help='API prefix')
         parser.add_argument('--api-router', '-r', help='router module path')
 
@@ -56,7 +56,8 @@ class Command(BaseCommand):
         attrs, related = {}, {}
         for field_name, field in fi.fields.items():
             attrs[field_name] = {}
-            if field.default != NOT_PROVIDED:
+            # Use the default if it's provided and not a callable.
+            if field.default != NOT_PROVIDED and not callable(field.default):
                 attrs[field_name]['default'] = field.default
         for field_name, related_info in fi.forward_relations.items():
             related[field_name] = {
@@ -71,6 +72,10 @@ class Command(BaseCommand):
             if related_info.to_many:
                 related[field_name]['many'] = True
         model_name = model.__name__
+        if model_name in self.models:
+            new_name = f'{app.capitalize()}{model_name}'
+            self.stderr.write(f'duplicate model name, "{model_name}", using "{new_name}" instead')
+            model_name = new_name
         self.models[model_name] = {
             'attributes': attrs,
             'relationships': related
@@ -105,4 +110,6 @@ class Command(BaseCommand):
         return api
 
     def get_router(self, path):
+        if not path:
+            raise ValueError('invalid router path')
         return import_string(path)
