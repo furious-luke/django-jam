@@ -29,29 +29,61 @@ class Command(BaseCommand):
     help = 'Generate redux-jam model descriptions.'
 
     def add_arguments(self, parser):
-        parser.add_argument('apps', metavar='A', nargs='+', help='apps to dump')
+        parser.add_argument('apps', metavar='APPS', nargs='*', help='apps to dump')
         parser.add_argument('--api-output', '-o', default='.', help='output prefix')
         parser.add_argument('--model-output', '-n', default='.', help='output prefix')
         parser.add_argument('--api-prefix', '-a', default='/api/v1', help='API prefix')
         parser.add_argument('--api-router', '-r', help='router module path')
 
     def handle(self, **options):
-        self.dump_models(options)
-        self.dump_api(options)
+        api, models = self.find_api_and_models(options)
+        self.dump_models(models, options)
+        self.dump_api(api, options)
 
-    def dump_models(self, options):
+    def find_api_and_models(self, options):
+        """ Find all endpoints for models.
+
+        Skip any endpoints without a model, and warn if we find duplicate endpoints for
+        a model. We will need to be able to choose which one to use. Perhaps interactive?
+        """
+        api = {}
+        models = {}
+        router = self.get_router(options['api_router'])
+        prefix = options['api_prefix']
+        if prefix[0] == '/':
+            prefix = prefix[1:]
+        if prefix[-1] == '/':
+            prefix = prefix[:-1]
+        for name, vs, single in router.registry:
+            try:
+                model = vs.queryset.model
+            except:
+                continue
+            if model in models:
+                self.stderr.write(f'WARNING: duplicate endpoints for model "{model.__name__}" and endpoint "{name}"')
+                continue
+            cur = api
+            for part in prefix.split('/'):
+                cur = cur.setdefault(part, {})
+            cur[name] = 'CRUD'
+            models[model] = (name, single)
+        return api, models
+
+    def dump_models(self, models, options):
         self.models = {}
         for cfg in apps.get_app_configs():
-            if cfg.name in options['apps']:
-                self.process_app(cfg)
+            if not options['apps'] or cfg.name in options['apps']:
+                self.process_app(cfg, models)
         fn = os.path.join(options['model_output'], 'models.json')
         self.export(self.models, fn)
 
-    def process_app(self, app):
+    def process_app(self, app, models):
         for model in app.get_models():
-            self.process_model(app, model)
+            if model not in models:
+                continue
+            self.process_model(app, model, models[model])
 
-    def process_model(self, app, model):
+    def process_model(self, app, model, names):
         fi = get_field_info(model)
         attrs, related = {}, {}
         for field_name, field in fi.fields.items():
@@ -78,7 +110,11 @@ class Command(BaseCommand):
             model_name = new_name
         self.models[model_name] = {
             'attributes': attrs,
-            'relationships': related
+            'relationships': related,
+            'api': {
+                'plural': names[0],
+                'single': names[1]
+            }
         }
 
     def export(self, data, filename):
@@ -89,13 +125,13 @@ class Command(BaseCommand):
         else:
             self.stdout.write(out)
 
-    def dump_api(self, options):
-        api = self.get_api(options)
+    def dump_api(self, api, options):
         fn = os.path.join(options['api_output'], 'api.json')
         self.export(api, fn)
 
     def get_api(self, options):
         api = {}
+        models = {}
         router = self.get_router(options['api_router'])
         prefix = options['api_prefix']
         if prefix[0] == '/':
@@ -103,11 +139,16 @@ class Command(BaseCommand):
         if prefix[-1] == '/':
             prefix = prefix[:-1]
         for name, vs, single in router.registry:
+            try:
+                model = vs.queryset.model
+            except:
+                continue
             cur = api
             for part in prefix.split('/'):
                 cur = cur.setdefault(part, {})
             cur[name] = 'CRUD'
-        return api
+            models[model] = (name, single)
+        return api, models
 
     def get_router(self, path):
         if not path:
