@@ -1,15 +1,21 @@
-from django.apps import apps
-from django.utils.module_loading import import_string
-from django.db.models.fields import NOT_PROVIDED
-from django.conf import settings
-from rest_framework.utils.model_meta import get_field_info
 from rest_framework.fields import empty
+from rest_framework.utils.model_meta import get_field_info
 from rest_framework_json_api.relations import ResourceRelatedField
+
+from django.apps import apps
+from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
+from django.db.models.fields import NOT_PROVIDED
+from django.utils.module_loading import import_string
 
 from .utils import get_related_name
 
 
 class Generator:
+    def __init__(self, api_prefix=None):
+        self.api_prefix = api_prefix
+        self.encoder = DjangoJSONEncoder()
+
     def generate(self, included_apps=[], **kwargs):
         api, models = self.find_api_and_models(**kwargs)
         processed_models = {}
@@ -97,8 +103,13 @@ class Generator:
             if hasattr(field, name):
                 val = getattr(field, name)
                 if self.has_option(field, val, default):
-                    if not callable(val):
-                        opts[transformed] = val
+                    if callable(val):
+                        continue
+                    try:
+                        self.encoder.encode(val)
+                    except:
+                        continue
+                    opts[transformed] = val
         return opts
 
     def has_option(self, field, value, default):
@@ -120,7 +131,7 @@ class DRFGenerator(Generator):
         api = {}
         models = {}
         router = self.get_router(router_module)
-        prefix = api_prefix or settings.API_PREFIX
+        prefix = api_prefix or self.api_prefix or settings.API_PREFIX
         if not prefix:
             raise ValueError('invalid API prefix')
         if prefix[0] == '/':
@@ -134,7 +145,7 @@ class DRFGenerator(Generator):
                 model = vs.queryset.model
             except:
                 continue
-            attrs, related = {}, {}
+            # attrs, related = {}, {}
             # sc = vs.serializer_class()
             # for field in sc._readable_fields:
             #     self.process_field(field, model, attrs, related)
@@ -220,4 +231,4 @@ class DRFGenerator(Generator):
         module_path = module_path or settings.ROOT_ROUTERCONF
         if not module_path:
             raise ValueError('invalid router module path')
-        return import_string(module_path + '.router')
+        return import_string(module_path)
