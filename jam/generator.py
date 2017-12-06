@@ -105,6 +105,12 @@ class Generator:
                 if self.has_option(field, val, default):
                     if callable(val):
                         continue
+
+                    # A bit yucky, but for choices we need to coerce it
+                    # to a list first in order to handle model_utils.Choices.
+                    if name == 'choices':
+                        val = [x for x in val]
+
                     try:
                         self.encoder.encode(val)
                     except:
