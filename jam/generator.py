@@ -1,12 +1,11 @@
-from rest_framework.fields import empty
-from rest_framework.utils.model_meta import get_field_info
-from rest_framework_json_api.relations import ResourceRelatedField
-
 from django.apps import apps
 from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db.models.fields import NOT_PROVIDED
 from django.utils.module_loading import import_string
+from rest_framework.fields import empty
+from rest_framework.utils.model_meta import get_field_info
+from rest_framework_json_api.relations import ResourceRelatedField
 
 from .utils import get_related_name
 
@@ -151,21 +150,21 @@ class DRFGenerator(Generator):
                 model = vs.queryset.model
             except:
                 continue
-            # attrs, related = {}, {}
-            # sc = vs.serializer_class()
-            # for field in sc._readable_fields:
-            #     self.process_field(field, model, attrs, related)
+            attrs, related = {}, {}
+            sc = vs.serializer_class()
+            for field in sc._readable_fields:
+                self.process_field(field, model, attrs, related)
             cur = api
             for part in prefix.split('/'):
                 cur = cur.setdefault(part, {})
             cur[name] = 'CRUD'
             if single in models:
                 raise Exception(f'need to add a name to viewset: {name}')
-            # models[single] = {
-            #     'plural': name,
-            #     'attributes': attrs,
-            #     'relattionships': related
-            # }
+            models[single] = {
+                'plural': name,
+                'attributes': attrs,
+                'relattionships': related
+            }
             models[model] = [name, single]
         return api, models
 
