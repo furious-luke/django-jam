@@ -84,7 +84,10 @@ class DRFGenerator(Generator):
             cur = api
             for part in prefix.split('/'):
                 cur = cur.setdefault(part, {})
-            cur[name] = 'CRUD'
+            parts = name.split('/')
+            for part in parts[:-1]:
+                cur = cur.setdefault(part, {})
+            cur[parts[-1]] = 'CRUD'
             if single in models:
                 raise Exception(f'duplicate endpoints, need to add a name to viewset: {name}')
             models[single] = {
