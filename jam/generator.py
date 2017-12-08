@@ -1,6 +1,8 @@
+import importlib
 import logging
 
 from rest_framework.fields import empty
+from rest_framework.relations import ManyRelatedField
 from rest_framework.utils.model_meta import get_field_info
 from rest_framework_json_api.relations import ResourceRelatedField
 
@@ -63,6 +65,26 @@ class DRFGenerator(Generator):
             prefix = prefix[1:]
         if prefix[-1] == '/':
             prefix = prefix[:-1]
+
+        # Before pushing on, build a mapping of serializers to singular
+        # names we'll use for resources.
+        resource_map = {}
+        for name, vs, single in router.registry:
+            if name in self.exclude_endpoints:
+                continue
+            try:
+                model = vs.queryset.model
+            except:
+                continue
+            sc = type(vs.serializer_class())
+            resource_map[sc.__name__] = single
+
+            # Add a default mapping for each model we encounter, assuming
+            # the first mapped value is okay.
+            # TODO: This is probably not okay.
+            if model.__name__ not in resource_map:
+                resource_map[model.__name__] = single
+
         for name, vs, single in router.registry:
             logger.info(f'Working on endpoint: {name}')
             if name in self.exclude_endpoints:
@@ -80,7 +102,7 @@ class DRFGenerator(Generator):
             logger.info(f'  Have serializer: {sc_name}')
             for field in sc._readable_fields:
                 logger.info(f'    Processing field: {field.field_name}')
-                self.process_field(field, model, attrs, related)
+                self.process_field(sc, resource_map, field, model, attrs, related)
             cur = api
             for part in prefix.split('/'):
                 cur = cur.setdefault(part, {})
@@ -93,16 +115,16 @@ class DRFGenerator(Generator):
             models[single] = {
                 'plural': name,
                 'attributes': attrs,
-                'relattionships': related,
+                'relationships': related,
                 'model': model
             }
         return api, models
 
-    def process_field(self, field, model, attrs, related):
+    def process_field(self, serializer_class, resource_map, field, model, attrs, related):
         if field.field_name in ['id']:
             return
-        if isinstance(field, ResourceRelatedField):
-            self.process_relationship(field, model, related)
+        if isinstance(field, (ResourceRelatedField, ManyRelatedField)):
+            self.process_relationship(serializer_class, resource_map, field, model, related)
         else:
             self.process_attribute(field, attrs)
 
@@ -128,7 +150,7 @@ class DRFGenerator(Generator):
                     opts[name] = val
         attrs[field.field_name] = opts
 
-    def process_relationship(self, field, model, related):
+    def process_relationship(self, serializer_class, resource_map, field, model, related):
         opt_names = [
             'label',
             ('read_only', False),
@@ -151,7 +173,17 @@ class DRFGenerator(Generator):
             if field_name != field.field_name:
                 continue
             break
-        opts['type'] = related_info.related_model.__name__
+
+        # Try and use the serializer resource name, otherwise pick
+        # the model name.
+        opts['type'] = self.get_resource_name(serializer_class, field_name)
+        if not opts['type']:
+            opts['type'] = related_info.related_model.__name__
+
+        # Try to map to a more suitable resource name.
+        opts['type'] = resource_map.get(opts['type'], opts['type'])
+        logger.info(f'      Has resource type: {opts["type"]}')
+
         related_name = get_related_name(
             related_info.related_model,
             related_info.model_field
@@ -159,8 +191,25 @@ class DRFGenerator(Generator):
         if related_name:
             opts['relatedName'] = related_name
         if related_info.to_many:
-            related['many'] = True
+            opts['many'] = True
         related[field.field_name] = opts
+
+    def get_resource_name(self, serializer_class, field_name):
+        try:
+            rel_sc = serializer_class.included_serializers[field_name]
+        except:
+            rel_sc = None
+        if rel_sc:
+            try:
+                parts = rel_sc.split('.')
+                rel_sc = getattr(importlib.import_module('.'.join(parts[:-1])), parts[-1])
+            except AttributeError:
+                pass
+            try:
+                return rel_sc.resource_name
+            except AttributeError:
+                pass
+        return None
 
     def get_router(self, module_path):
         module_path = module_path or settings.ROOT_ROUTERCONF
