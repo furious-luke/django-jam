@@ -17,9 +17,15 @@ class Command(BaseCommand):
         parser.add_argument('--model-output', '-n', default='.', help='output prefix')
         parser.add_argument('--api-prefix', '-a', help='API prefix')
         parser.add_argument('--api-router', '-r', help='router module path')
+        parser.add_argument('--exclude-serializers', nargs='*', help='serializers to exclude')
+        parser.add_argument('--exclude-endpoints', nargs='*', help='endpoints to exclude')
 
     def handle(self, **options):
-        schema = DRFGenerator(options['api_prefix']).generate()
+        schema = DRFGenerator(
+            options['api_prefix'],
+            exclude_serializers=options['exclude_serializers'],
+            exclude_endpoints=options['exclude_endpoints']
+        ).generate()
         api = TinyAPIExporter().export(schema),
         models = JAMExporter().export(schema)
         self.dump_api(api, options)

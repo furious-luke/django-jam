@@ -1,26 +1,42 @@
-from django.apps import apps
-from django.conf import settings
-from django.core.serializers.json import DjangoJSONEncoder
-from django.db.models.fields import NOT_PROVIDED
-from django.utils.module_loading import import_string
+import logging
+
 from rest_framework.fields import empty
 from rest_framework.utils.model_meta import get_field_info
 from rest_framework_json_api.relations import ResourceRelatedField
 
+from django.apps import apps
+from django.conf import settings
+from django.core.serializers.json import DjangoJSONEncoder
+from django.utils.module_loading import import_string
+
 from .utils import get_related_name
+
+logger = logging.getLogger(__name__)
 
 
 class Generator:
-    def __init__(self, api_prefix=None):
+    def __init__(self, api_prefix=None, **kwargs):
         self.api_prefix = api_prefix
+        self.exclude_serializers = kwargs.get('exclude_serializers', []) or []
+        self.exclude_endpoints = (
+            kwargs.get('exclude_endpoints', []) +
+            getattr(settings, 'JAM_ENDPOINT_EXCLUDE', [])
+        ) or []
         self.encoder = DjangoJSONEncoder()
 
     def generate(self, included_apps=[], **kwargs):
         api, models = self.find_api_and_models(**kwargs)
         processed_models = {}
+        valid_models = []
         for cfg in apps.get_app_configs():
             if not included_apps or cfg.name in included_apps:
-                self.process_app(cfg, models, processed_models)
+                for model in cfg.get_models():
+                    valid_models.append(model)
+        for type_name, info in models.items():
+            model = info.pop('model')
+            if model not in valid_models:
+                continue
+            processed_models[type_name] = info
         return {
             'api': api,
             'models': processed_models
@@ -28,102 +44,6 @@ class Generator:
 
     def find_api_and_models(self):
         raise NotImplemented
-
-    def process_app(self, app, models, processed_models):
-        for model in app.get_models():
-            if model not in models:
-                continue
-            self.process_model(app, model, models[model], processed_models)
-
-    def process_model(self, app, model, names, processed_models):
-        fi = get_field_info(model)
-        attrs, related = {}, {}
-        for field_name, field in fi.fields.items():
-            attrs[field_name] = self.extract_options(
-                [
-                    (('verbose_name', 'label'), None),
-                    (('read_only', 'readOnly'), False),
-                    ('required', False),
-                    ('blank', True),
-                    ('null', True),
-                    ('default', NOT_PROVIDED),
-                    (('max_length', 'maxLength'), None),
-                    ('choices', [])
-                ],
-                field
-            )
-            attrs[field_name]['type'] = 'char'
-        for field_name, related_info in fi.forward_relations.items():
-            related[field_name] = {
-                'type': related_info.related_model.__name__,
-            }
-            related_name = get_related_name(
-                related_info.related_model,
-                related_info.model_field
-            )
-            if related_name:
-                related[field_name]['relatedName'] = related_name
-            if related_info.to_many:
-                related[field_name]['many'] = True
-            related[field_name].update(
-                self.extract_options(
-                    [
-                        (('verbose_name', 'label'), None),
-                        (('read_only', 'readOnly'), False),
-                        ('required', False),
-                        ('blank', True),
-                        ('null', True),
-                        ('default', NOT_PROVIDED),
-                        ('choices', [])
-                    ],
-                    related_info.model_field
-                )
-            )
-        model_name = model.__name__
-        if model_name in processed_models:
-            raise TypeError(f'duplicate model name found: "{model_name}"')
-        processed_models[model_name] = {
-            'plural': names[0],
-            'attributes': attrs,
-            'relationships': related
-        }
-
-    def extract_options(self, options, field):
-        opts = {}
-        for name in options:
-            try:
-                name, default = name
-            except:
-                default = None
-            try:
-                name, transformed = name
-            except:
-                transformed = name
-            if hasattr(field, name):
-                val = getattr(field, name)
-                if self.has_option(field, val, default):
-                    if callable(val):
-                        continue
-
-                    # A bit yucky, but for choices we need to coerce it
-                    # to a list first in order to handle model_utils.Choices.
-                    if name == 'choices':
-                        val = [x for x in val]
-
-                    try:
-                        self.encoder.encode(val)
-                    except:
-                        continue
-                    opts[transformed] = val
-        return opts
-
-    def has_option(self, field, value, default):
-        if not isinstance(default, tuple):
-            default = (default,)
-        for x in default:
-            if value == x:
-                return False
-        return True
 
 
 class DRFGenerator(Generator):
@@ -144,7 +64,8 @@ class DRFGenerator(Generator):
         if prefix[-1] == '/':
             prefix = prefix[:-1]
         for name, vs, single in router.registry:
-            if name in getattr(settings, 'JAM_ENDPOINT_EXCLUDE', []):
+            logger.info(f'Working on endpoint: {name}')
+            if name in self.exclude_endpoints:
                 continue
             try:
                 model = vs.queryset.model
@@ -152,20 +73,26 @@ class DRFGenerator(Generator):
                 continue
             attrs, related = {}, {}
             sc = vs.serializer_class()
+            sc_name = type(sc).__name__
+            if sc_name in self.exclude_serializers:
+                logger.info(f'  Excluding serializer: {sc_name}')
+                continue
+            logger.info(f'  Have serializer: {sc_name}')
             for field in sc._readable_fields:
+                logger.info(f'    Processing field: {field.field_name}')
                 self.process_field(field, model, attrs, related)
             cur = api
             for part in prefix.split('/'):
                 cur = cur.setdefault(part, {})
             cur[name] = 'CRUD'
             if single in models:
-                raise Exception(f'need to add a name to viewset: {name}')
+                raise Exception(f'duplicate endpoints, need to add a name to viewset: {name}')
             models[single] = {
                 'plural': name,
                 'attributes': attrs,
-                'relattionships': related
+                'relattionships': related,
+                'model': model
             }
-            models[model] = [name, single]
         return api, models
 
     def process_field(self, field, model, attrs, related):
