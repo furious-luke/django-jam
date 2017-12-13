@@ -1,27 +1,45 @@
+import importlib
+import logging
+
 from rest_framework.fields import empty
+from rest_framework.relations import ManyRelatedField
 from rest_framework.utils.model_meta import get_field_info
 from rest_framework_json_api.relations import ResourceRelatedField
 
 from django.apps import apps
 from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
-from django.db.models.fields import NOT_PROVIDED
 from django.utils.module_loading import import_string
 
 from .utils import get_related_name
 
+logger = logging.getLogger(__name__)
+
 
 class Generator:
-    def __init__(self, api_prefix=None):
+    def __init__(self, api_prefix=None, **kwargs):
         self.api_prefix = api_prefix
+        self.exclude_serializers = kwargs.get('exclude_serializers', []) or []
+        self.exclude_endpoints = (
+            (kwargs.get('exclude_endpoints', []) or []) +
+            (getattr(settings, 'JAM_ENDPOINT_EXCLUDE', []) or [])
+        ) or []
         self.encoder = DjangoJSONEncoder()
 
     def generate(self, included_apps=[], **kwargs):
         api, models = self.find_api_and_models(**kwargs)
         processed_models = {}
+        valid_models = []
         for cfg in apps.get_app_configs():
             if not included_apps or cfg.name in included_apps:
-                self.process_app(cfg, models, processed_models)
+                for model in cfg.get_models():
+                    valid_models.append(model)
+        for type_name, info in models.items():
+            model = info.pop('model')
+            if model not in valid_models:
+                continue
+            info.pop('serializer_class')
+            processed_models[type_name] = info
         return {
             'api': api,
             'models': processed_models
@@ -29,102 +47,6 @@ class Generator:
 
     def find_api_and_models(self):
         raise NotImplemented
-
-    def process_app(self, app, models, processed_models):
-        for model in app.get_models():
-            if model not in models:
-                continue
-            self.process_model(app, model, models[model], processed_models)
-
-    def process_model(self, app, model, names, processed_models):
-        fi = get_field_info(model)
-        attrs, related = {}, {}
-        for field_name, field in fi.fields.items():
-            attrs[field_name] = self.extract_options(
-                [
-                    (('verbose_name', 'label'), None),
-                    (('read_only', 'readOnly'), False),
-                    ('required', False),
-                    ('blank', True),
-                    ('null', True),
-                    ('default', NOT_PROVIDED),
-                    (('max_length', 'maxLength'), None),
-                    ('choices', [])
-                ],
-                field
-            )
-            attrs[field_name]['type'] = 'char'
-        for field_name, related_info in fi.forward_relations.items():
-            related[field_name] = {
-                'type': related_info.related_model.__name__,
-            }
-            related_name = get_related_name(
-                related_info.related_model,
-                related_info.model_field
-            )
-            if related_name:
-                related[field_name]['relatedName'] = related_name
-            if related_info.to_many:
-                related[field_name]['many'] = True
-            related[field_name].update(
-                self.extract_options(
-                    [
-                        (('verbose_name', 'label'), None),
-                        (('read_only', 'readOnly'), False),
-                        ('required', False),
-                        ('blank', True),
-                        ('null', True),
-                        ('default', NOT_PROVIDED),
-                        ('choices', [])
-                    ],
-                    related_info.model_field
-                )
-            )
-        model_name = model.__name__
-        if model_name in processed_models:
-            raise TypeError(f'duplicate model name found: "{model_name}"')
-        processed_models[model_name] = {
-            'plural': names[0],
-            'attributes': attrs,
-            'relationships': related
-        }
-
-    def extract_options(self, options, field):
-        opts = {}
-        for name in options:
-            try:
-                name, default = name
-            except:
-                default = None
-            try:
-                name, transformed = name
-            except:
-                transformed = name
-            if hasattr(field, name):
-                val = getattr(field, name)
-                if self.has_option(field, val, default):
-                    if callable(val):
-                        continue
-
-                    # A bit yucky, but for choices we need to coerce it
-                    # to a list first in order to handle model_utils.Choices.
-                    if name == 'choices':
-                        val = [x for x in val]
-
-                    try:
-                        self.encoder.encode(val)
-                    except:
-                        continue
-                    opts[transformed] = val
-        return opts
-
-    def has_option(self, field, value, default):
-        if not isinstance(default, tuple):
-            default = (default,)
-        for x in default:
-            if value == x:
-                return False
-        return True
 
 
 class DRFGenerator(Generator):
@@ -144,36 +66,76 @@ class DRFGenerator(Generator):
             prefix = prefix[1:]
         if prefix[-1] == '/':
             prefix = prefix[:-1]
+
+        # Before pushing on, build a mapping of serializers to singular
+        # names we'll use for resources.
+        resource_map = {}
+        # for name, vs, single in router.registry:
+        #     if name in self.exclude_endpoints:
+        #         continue
+        #     try:
+        #         model = vs.queryset.model
+        #     except Exception:
+        #         continue
+        #     sc = type(vs.serializer_class())
+        #     resource_map[sc.__name__] = single
+
+        #     # Add a default mapping for each model we encounter, assuming
+        #     # the first mapped value is okay.
+        #     # TODO: This is probably not okay.
+        #     if model.__name__ not in resource_map:
+        #         resource_map[model.__name__] = single
+
         for name, vs, single in router.registry:
-            if name in getattr(settings, 'JAM_ENDPOINT_EXCLUDE', []):
+            logger.info(f'Working on endpoint: {name}')
+            if name in self.exclude_endpoints:
                 continue
             try:
                 model = vs.queryset.model
-            except:
+            except Exception:
                 continue
-            # attrs, related = {}, {}
-            # sc = vs.serializer_class()
-            # for field in sc._readable_fields:
-            #     self.process_field(field, model, attrs, related)
+            attrs, related = {}, {}
+            sc_class = vs.serializer_class
+            sc_name = sc_class.__name__
+            sc = sc_class()
+            if sc_name in self.exclude_serializers:
+                logger.info(f'  Excluding serializer: {sc_name}')
+                continue
+            logger.info(f'  Have serializer: {sc_name}')
+            for field in sc._readable_fields:
+                logger.info(f'    Processing field: {field.field_name}')
+                self.process_field(sc, resource_map, field, model, attrs, related)
             cur = api
             for part in prefix.split('/'):
                 cur = cur.setdefault(part, {})
-            cur[name] = 'CRUD'
-            if single in models:
-                raise Exception(f'need to add a name to viewset: {name}')
-            # models[single] = {
-            #     'plural': name,
-            #     'attributes': attrs,
-            #     'relattionships': related
-            # }
-            models[model] = [name, single]
+            parts = name.split('/')
+            for part in parts[:-1]:
+                cur = cur.setdefault(part, {})
+            cur[parts[-1]] = 'CRUD'
+            try:
+                # TODO: Get the resource name using JSON-API calls maybe?
+                res_name = sc.Meta.resource_name
+            except Exception:
+                res_name = model.__name__
+            if res_name in models:
+                if models[res_name]['serializer_class'] != sc_class:
+                    raise Exception(f'duplicate endpoints, need to add a resource name for: {name}')
+                logger.warning(f'Two endpoints share the same resource name and serializer: {res_name}')
+            logger.info(f'  Resource name: {res_name}')
+            models[res_name] = {
+                'plural': name,
+                'attributes': attrs,
+                'relationships': related,
+                'model': model,
+                'serializer_class': sc_class
+            }
         return api, models
 
-    def process_field(self, field, model, attrs, related):
+    def process_field(self, serializer_class, resource_map, field, model, attrs, related):
         if field.field_name in ['id']:
             return
-        if isinstance(field, ResourceRelatedField):
-            self.process_relationship(field, model, related)
+        if isinstance(field, (ResourceRelatedField, ManyRelatedField)):
+            self.process_relationship(serializer_class, resource_map, field, model, related)
         else:
             self.process_attribute(field, attrs)
 
@@ -191,7 +153,7 @@ class DRFGenerator(Generator):
         for name in opt_names:
             try:
                 name, default = name
-            except:
+            except Exception:
                 default = None
             if hasattr(field, name):
                 val = getattr(field, name)
@@ -199,7 +161,7 @@ class DRFGenerator(Generator):
                     opts[name] = val
         attrs[field.field_name] = opts
 
-    def process_relationship(self, field, model, related):
+    def process_relationship(self, serializer_class, resource_map, field, model, related):
         opt_names = [
             'label',
             ('read_only', False),
@@ -211,7 +173,7 @@ class DRFGenerator(Generator):
         for name in opt_names:
             try:
                 name, default = name
-            except:
+            except Exception:
                 default = None
             if hasattr(field, name):
                 val = getattr(field, name)
@@ -222,7 +184,17 @@ class DRFGenerator(Generator):
             if field_name != field.field_name:
                 continue
             break
-        opts['type'] = related_info.related_model.__name__
+
+        # Try and use the serializer resource name, otherwise pick
+        # the model name.
+        opts['type'] = self.get_resource_name(serializer_class, field_name)
+        if not opts['type']:
+            opts['type'] = related_info.related_model.__name__
+
+        # # Try to map to a more suitable resource name.
+        # opts['type'] = resource_map.get(opts['type'], opts['type'])
+        # logger.info(f'      Has resource type: {opts["type"]}')
+
         related_name = get_related_name(
             related_info.related_model,
             related_info.model_field
@@ -230,8 +202,25 @@ class DRFGenerator(Generator):
         if related_name:
             opts['relatedName'] = related_name
         if related_info.to_many:
-            related['many'] = True
+            opts['many'] = True
         related[field.field_name] = opts
+
+    def get_resource_name(self, serializer_class, field_name):
+        try:
+            rel_sc = serializer_class.included_serializers[field_name]
+        except Exception:
+            rel_sc = None
+        if rel_sc:
+            try:
+                parts = rel_sc.split('.')
+                rel_sc = getattr(importlib.import_module('.'.join(parts[:-1])), parts[-1])
+            except AttributeError:
+                pass
+            try:
+                return rel_sc.resource_name
+            except AttributeError:
+                pass
+        return None
 
     def get_router(self, module_path):
         module_path = module_path or settings.ROOT_ROUTERCONF

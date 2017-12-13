@@ -1,4 +1,5 @@
 import json
+import os
 
 
 class JSONExporter:
@@ -15,7 +16,7 @@ class JAMExporter(JSONExporter):
     def export(self, schema, output_dir=None):
         models = schema['models']
         if output_dir is not None:
-            fn = os.path.join(option_dir, 'models.json')
+            fn = os.path.join(output_dir, 'models.json')
             super().export(models, fn)
         else:
             return models
