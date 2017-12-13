@@ -21,8 +21,8 @@ class Generator:
         self.api_prefix = api_prefix
         self.exclude_serializers = kwargs.get('exclude_serializers', []) or []
         self.exclude_endpoints = (
-            kwargs.get('exclude_endpoints', []) +
-            getattr(settings, 'JAM_ENDPOINT_EXCLUDE', [])
+            (kwargs.get('exclude_endpoints', []) or []) +
+            (getattr(settings, 'JAM_ENDPOINT_EXCLUDE', []) or [])
         ) or []
         self.encoder = DjangoJSONEncoder()
 
@@ -38,6 +38,7 @@ class Generator:
             model = info.pop('model')
             if model not in valid_models:
                 continue
+            info.pop('serializer_class')
             processed_models[type_name] = info
         return {
             'api': api,
@@ -69,21 +70,21 @@ class DRFGenerator(Generator):
         # Before pushing on, build a mapping of serializers to singular
         # names we'll use for resources.
         resource_map = {}
-        for name, vs, single in router.registry:
-            if name in self.exclude_endpoints:
-                continue
-            try:
-                model = vs.queryset.model
-            except:
-                continue
-            sc = type(vs.serializer_class())
-            resource_map[sc.__name__] = single
+        # for name, vs, single in router.registry:
+        #     if name in self.exclude_endpoints:
+        #         continue
+        #     try:
+        #         model = vs.queryset.model
+        #     except Exception:
+        #         continue
+        #     sc = type(vs.serializer_class())
+        #     resource_map[sc.__name__] = single
 
-            # Add a default mapping for each model we encounter, assuming
-            # the first mapped value is okay.
-            # TODO: This is probably not okay.
-            if model.__name__ not in resource_map:
-                resource_map[model.__name__] = single
+        #     # Add a default mapping for each model we encounter, assuming
+        #     # the first mapped value is okay.
+        #     # TODO: This is probably not okay.
+        #     if model.__name__ not in resource_map:
+        #         resource_map[model.__name__] = single
 
         for name, vs, single in router.registry:
             logger.info(f'Working on endpoint: {name}')
@@ -91,11 +92,12 @@ class DRFGenerator(Generator):
                 continue
             try:
                 model = vs.queryset.model
-            except:
+            except Exception:
                 continue
             attrs, related = {}, {}
-            sc = vs.serializer_class()
-            sc_name = type(sc).__name__
+            sc_class = vs.serializer_class
+            sc_name = sc_class.__name__
+            sc = sc_class()
             if sc_name in self.exclude_serializers:
                 logger.info(f'  Excluding serializer: {sc_name}')
                 continue
@@ -110,13 +112,22 @@ class DRFGenerator(Generator):
             for part in parts[:-1]:
                 cur = cur.setdefault(part, {})
             cur[parts[-1]] = 'CRUD'
-            if single in models:
-                raise Exception(f'duplicate endpoints, need to add a name to viewset: {name}')
-            models[single] = {
+            try:
+                # TODO: Get the resource name using JSON-API calls maybe?
+                res_name = sc.Meta.resource_name
+            except Exception:
+                res_name = model.__name__
+            if res_name in models:
+                if models[res_name]['serializer_class'] != sc_class:
+                    raise Exception(f'duplicate endpoints, need to add a resource name for: {name}')
+                logger.warning(f'Two endpoints share the same resource name and serializer: {res_name}')
+            logger.info(f'  Resource name: {res_name}')
+            models[res_name] = {
                 'plural': name,
                 'attributes': attrs,
                 'relationships': related,
-                'model': model
+                'model': model,
+                'serializer_class': sc_class
             }
         return api, models
 
@@ -142,7 +153,7 @@ class DRFGenerator(Generator):
         for name in opt_names:
             try:
                 name, default = name
-            except:
+            except Exception:
                 default = None
             if hasattr(field, name):
                 val = getattr(field, name)
@@ -162,7 +173,7 @@ class DRFGenerator(Generator):
         for name in opt_names:
             try:
                 name, default = name
-            except:
+            except Exception:
                 default = None
             if hasattr(field, name):
                 val = getattr(field, name)
@@ -180,9 +191,9 @@ class DRFGenerator(Generator):
         if not opts['type']:
             opts['type'] = related_info.related_model.__name__
 
-        # Try to map to a more suitable resource name.
-        opts['type'] = resource_map.get(opts['type'], opts['type'])
-        logger.info(f'      Has resource type: {opts["type"]}')
+        # # Try to map to a more suitable resource name.
+        # opts['type'] = resource_map.get(opts['type'], opts['type'])
+        # logger.info(f'      Has resource type: {opts["type"]}')
 
         related_name = get_related_name(
             related_info.related_model,
@@ -197,7 +208,7 @@ class DRFGenerator(Generator):
     def get_resource_name(self, serializer_class, field_name):
         try:
             rel_sc = serializer_class.included_serializers[field_name]
-        except:
+        except Exception:
             rel_sc = None
         if rel_sc:
             try:
