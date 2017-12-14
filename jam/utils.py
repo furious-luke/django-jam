@@ -8,8 +8,10 @@ def get_related_name(model, field):
     all_related_objects = [r for r in opts.related_objects]
     for relation in all_related_objects:
         if relation.field == field:
-            if relation.related_name == '+':
+            if relation.related_name and relation.related_name[-1] == '+':
                 return None
-            else:
+            elif relation.related_name:
                 return relation.related_name
+            else:
+                return relation.name + '_set'
     return None
