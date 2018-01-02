@@ -1,14 +1,12 @@
-import importlib
 import logging
 
-from rest_framework.fields import empty
-from rest_framework.relations import ManyRelatedField
-from rest_framework.utils.model_meta import get_field_info
-from rest_framework_json_api.relations import ResourceRelatedField
+import inflection
+from rest_framework_json_api.metadata import JSONAPIMetadata
 
 from django.apps import apps
 from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
+from django.db.models.fields import related
 from django.utils.module_loading import import_string
 
 from .utils import get_related_name
@@ -49,6 +47,93 @@ class Generator:
         raise NotImplemented
 
 
+class SerializerMetadata(JSONAPIMetadata):
+    """ Generate JAM specialised metadata for serializers.
+
+    JAM is very similar to JSONAPIMetadata, but requires a few changes:
+      * Ignores all reverse relationships.
+      * Includes "relatedName" in forward relationships.
+      * M2M fields include a "many=true" value.
+      * Ignores "allows_include".
+      * Camelcases all option names.
+      * Splits results into attributes and relationships.
+    """
+    try:
+        reverse_relations = {
+            related.ReverseManyToOneDescriptor,
+            related.ReverseOneToOneDescriptor
+        }
+    except AttributeError:
+        reverse_relations = {
+            related.ReverseManyRelatedObjectsDescriptor,
+            related.ReverseSingleRelatedObjectDescriptor
+        }
+
+    def get_serializer_info(self, serializer):
+        info = super().get_serializer_info(serializer)
+        attributes = {}
+        relationships = {}
+        for name, field in info.items():
+            destination = attributes
+            new_field = {}
+            for attr_name, attr_value in field.items():
+                if attr_name == 'relationship_type':
+                    destination = relationships
+                    if attr_value == 'ManyToMany':
+                        new_field['many'] = True
+                elif attr_name == 'relationship_resource':
+                    new_field['type'] = attr_value
+                elif attr_name in {'allows_include'}:
+                    pass
+                else:
+                    new_field[inflection.camelize(attr_name, False)] = attr_value
+            if new_field.get('reverse'):
+                continue
+            if new_field['type'] == 'GenericField':
+                del new_field['type']
+            destination[name] = new_field
+        return {
+            'attributes': attributes,
+            'relationships': relationships
+        }
+
+    def get_field_info(self, field, field_name):
+        field_info = super().get_field_info(field, field_name)
+        serializer = field.parent
+        try:
+            serializer_model = getattr(serializer.Meta, 'model')
+            rel = getattr(serializer_model, field.field_name)
+            try:
+                rel_type = rel.__class__
+            except AttributeError:
+                pass
+            if rel_type in self.reverse_relations:
+                field_info['reverse'] = True
+            elif rel_type in self.relation_type_lookup.mapping:
+                rel_model = rel.field.target_field.model
+                rel_name = get_related_name(rel_model, rel.field)
+                if rel_name:
+                    field_info['relatedName'] = rel_name
+        except KeyError:
+            pass
+        except AttributeError:
+            pass
+
+        # Fields from `SerializerRelationshipMethodField` don't really store
+        # whether they're ManyToMany or not. It seems, however, that they will
+        # have a member on the field called `child_relation`, which we can use
+        # to know if it's a many or not.
+        if 'relationship_type' not in field_info and getattr(field, 'child_relation', None):
+            field_info['relationship_type'] = 'ManyToMany'
+
+            # We also need to define a relationship resource.
+            # TODO: Currently just using the model name, but this should really
+            #   be a serializer.
+            field_info['relationship_resource'] = field._kwargs['model'].__name__
+
+        return field_info
+
+
 class DRFGenerator(Generator):
     def find_api_and_models(self, api_prefix=None, router_module=None):
         """ Find all endpoints for models.
@@ -66,26 +151,6 @@ class DRFGenerator(Generator):
             prefix = prefix[1:]
         if prefix[-1] == '/':
             prefix = prefix[:-1]
-
-        # Before pushing on, build a mapping of serializers to singular
-        # names we'll use for resources.
-        resource_map = {}
-        # for name, vs, single in router.registry:
-        #     if name in self.exclude_endpoints:
-        #         continue
-        #     try:
-        #         model = vs.queryset.model
-        #     except Exception:
-        #         continue
-        #     sc = type(vs.serializer_class())
-        #     resource_map[sc.__name__] = single
-
-        #     # Add a default mapping for each model we encounter, assuming
-        #     # the first mapped value is okay.
-        #     # TODO: This is probably not okay.
-        #     if model.__name__ not in resource_map:
-        #         resource_map[model.__name__] = single
-
         for name, vs, single in router.registry:
             logger.info(f'Working on endpoint: {name}')
             if name in self.exclude_endpoints:
@@ -94,7 +159,6 @@ class DRFGenerator(Generator):
                 model = vs.queryset.model
             except Exception:
                 continue
-            attrs, related = {}, {}
             sc_class = vs.serializer_class
             sc_name = sc_class.__name__
             sc = sc_class()
@@ -102,9 +166,8 @@ class DRFGenerator(Generator):
                 logger.info(f'  Excluding serializer: {sc_name}')
                 continue
             logger.info(f'  Have serializer: {sc_name}')
-            for field in sc._readable_fields:
-                logger.info(f'    Processing field: {field.field_name}')
-                self.process_field(sc, resource_map, field, model, attrs, related)
+            meta = SerializerMetadata().get_serializer_info(sc)
+
             cur = api
             for part in prefix.split('/'):
                 cur = cur.setdefault(part, {})
@@ -124,103 +187,12 @@ class DRFGenerator(Generator):
             logger.info(f'  Resource name: {res_name}')
             models[res_name] = {
                 'plural': name,
-                'attributes': attrs,
-                'relationships': related,
+                'attributes': meta['attributes'],
+                'relationships': meta['relationships'],
                 'model': model,
                 'serializer_class': sc_class
             }
         return api, models
-
-    def process_field(self, serializer_class, resource_map, field, model, attrs, related):
-        if field.field_name in ['id']:
-            return
-        if isinstance(field, (ResourceRelatedField, ManyRelatedField)):
-            self.process_relationship(serializer_class, resource_map, field, model, related)
-        else:
-            self.process_attribute(field, attrs)
-
-    def process_attribute(self, field, attrs):
-        opt_names = [
-            'label',
-            ('read_only', False),
-            ('required', False),
-            ('allow_blank', True),
-            ('default', empty),
-            'max_length',
-            'choices'
-        ]
-        opts = {}
-        for name in opt_names:
-            try:
-                name, default = name
-            except Exception:
-                default = None
-            if hasattr(field, name):
-                val = getattr(field, name)
-                if val != default:
-                    opts[name] = val
-        attrs[field.field_name] = opts
-
-    def process_relationship(self, serializer_class, resource_map, field, model, related):
-        opt_names = [
-            'label',
-            ('read_only', False),
-            ('required', False),
-            ('allow_blank', True),
-            ('default', empty)
-        ]
-        opts = {}
-        for name in opt_names:
-            try:
-                name, default = name
-            except Exception:
-                default = None
-            if hasattr(field, name):
-                val = getattr(field, name)
-                if val != default:
-                    opts[name] = val
-        fi = get_field_info(model)
-        for field_name, related_info in fi.forward_relations.items():
-            if field_name != field.field_name:
-                continue
-            break
-
-        # Try and use the serializer resource name, otherwise pick
-        # the model name.
-        opts['type'] = self.get_resource_name(serializer_class, field_name)
-        if not opts['type']:
-            opts['type'] = related_info.related_model.__name__
-
-        # # Try to map to a more suitable resource name.
-        # opts['type'] = resource_map.get(opts['type'], opts['type'])
-        # logger.info(f'      Has resource type: {opts["type"]}')
-
-        related_name = get_related_name(
-            related_info.related_model,
-            related_info.model_field
-        )
-        if related_name:
-            opts['relatedName'] = related_name
-        if related_info.to_many:
-            opts['many'] = True
-        related[field.field_name] = opts
-
-    def get_resource_name(self, serializer_class, field_name):
-        try:
-            rel_sc = serializer_class.included_serializers[field_name]
-        except Exception:
-            rel_sc = None
-        if rel_sc:
-            try:
-                parts = rel_sc.split('.')
-                rel_sc = getattr(importlib.import_module('.'.join(parts[:-1])), parts[-1])
-            except AttributeError:
-                pass
-            try:
-                return rel_sc.resource_name
-            except AttributeError:
-                pass
-        return None
 
     def get_router(self, module_path):
         module_path = module_path or settings.ROOT_ROUTERCONF
