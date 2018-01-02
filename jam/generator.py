@@ -97,8 +97,8 @@ class SerializerMetadata(JSONAPIMetadata):
             'relationships': relationships
         }
 
-    def get_field_info(self, field):
-        field_info = super().get_field_info(field)
+    def get_field_info(self, field, field_name):
+        field_info = super().get_field_info(field, field_name)
         serializer = field.parent
         try:
             serializer_model = getattr(serializer.Meta, 'model')
