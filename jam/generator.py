@@ -118,6 +118,19 @@ class SerializerMetadata(JSONAPIMetadata):
             pass
         except AttributeError:
             pass
+
+        # Fields from `SerializerRelationshipMethodField` don't really store
+        # whether they're ManyToMany or not. It seems, however, that they will
+        # have a member on the field called `child_relation`, which we can use
+        # to know if it's a many or not.
+        if 'relationship_type' not in field_info and getattr(field, 'child_relation', None):
+            field_info['relationship_type'] = 'ManyToMany'
+
+            # We also need to define a relationship resource.
+            # TODO: Currently just using the model name, but this should really
+            #   be a serializer.
+            field_info['relationship_resource'] = field._kwargs['model'].__name__
+
         return field_info
 
 
