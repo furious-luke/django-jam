@@ -7,7 +7,7 @@ with open('./jam/__init__.py') as f:
     exec(re.search(r'VERSION = .*', f.read(), re.DOTALL).group())
 
 setup(
-    name='django-jam',
+    name='django-json-api-model',
     version=__version__,
     author='Luke Hodkinson',
     author_email='luke.hodkinson@uptickhq.com',
