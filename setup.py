@@ -1,15 +1,19 @@
 import os
+import re
 
 from setuptools import find_packages, setup
 
+with open('./jam/__init__.py') as f:
+    exec(re.search(r'VERSION = .*', f.read(), re.DOTALL).group())
+
 setup(
     name='django-jam',
-    version='0.0.1',
+    version=__version__,
     author='Luke Hodkinson',
-    author_email='furious.luke@gmail.com',
-    maintainer='Luke Hodkinson',
-    maintainer_email='furious.luke@gmail.com',
-    url='https://github.com/ABASystems/django-jam',
+    author_email='luke.hodkinson@uptickhq.com',
+    maintainer='Uptick',
+    maintainer_email='dev@uptickhq.com',
+    url='https://github.com/uptick/django-jam',
     description='',
     long_description=open(os.path.join(os.path.dirname(__file__), 'README.md')).read(),
     classifiers = [
