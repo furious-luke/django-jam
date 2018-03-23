@@ -1,5 +1,6 @@
 import os
-from setuptools import setup, find_packages
+
+from setuptools import find_packages, setup
 
 setup(
     name='django-jam',
@@ -26,5 +27,6 @@ setup(
     package_data={'': ['*.txt', '*.js', '*.html', '*.*']},
     install_requires=[
         'setuptools',
+        'inflection'
     ],
 )

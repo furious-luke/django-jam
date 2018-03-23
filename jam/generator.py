@@ -1,27 +1,43 @@
-from rest_framework.fields import empty
-from rest_framework.utils.model_meta import get_field_info
-from rest_framework_json_api.relations import ResourceRelatedField
+import logging
+
+import inflection
+from rest_framework_json_api.metadata import JSONAPIMetadata
 
 from django.apps import apps
 from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
-from django.db.models.fields import NOT_PROVIDED
+from django.db.models.fields import related
 from django.utils.module_loading import import_string
 
 from .utils import get_related_name
 
+logger = logging.getLogger(__name__)
+
 
 class Generator:
-    def __init__(self, api_prefix=None):
+    def __init__(self, api_prefix=None, **kwargs):
         self.api_prefix = api_prefix
+        self.exclude_serializers = kwargs.get('exclude_serializers', []) or []
+        self.exclude_endpoints = (
+            (kwargs.get('exclude_endpoints', []) or []) +
+            (getattr(settings, 'JAM_ENDPOINT_EXCLUDE', []) or [])
+        ) or []
         self.encoder = DjangoJSONEncoder()
 
     def generate(self, included_apps=[], **kwargs):
         api, models = self.find_api_and_models(**kwargs)
         processed_models = {}
+        valid_models = []
         for cfg in apps.get_app_configs():
             if not included_apps or cfg.name in included_apps:
-                self.process_app(cfg, models, processed_models)
+                for model in cfg.get_models():
+                    valid_models.append(model)
+        for type_name, info in models.items():
+            model = info.pop('model')
+            if model not in valid_models:
+                continue
+            info.pop('serializer_class')
+            processed_models[type_name] = info
         return {
             'api': api,
             'models': processed_models
@@ -30,101 +46,92 @@ class Generator:
     def find_api_and_models(self):
         raise NotImplemented
 
-    def process_app(self, app, models, processed_models):
-        for model in app.get_models():
-            if model not in models:
-                continue
-            self.process_model(app, model, models[model], processed_models)
 
-    def process_model(self, app, model, names, processed_models):
-        fi = get_field_info(model)
-        attrs, related = {}, {}
-        for field_name, field in fi.fields.items():
-            attrs[field_name] = self.extract_options(
-                [
-                    (('verbose_name', 'label'), None),
-                    (('read_only', 'readOnly'), False),
-                    ('required', False),
-                    ('blank', True),
-                    ('null', True),
-                    ('default', NOT_PROVIDED),
-                    (('max_length', 'maxLength'), None),
-                    ('choices', [])
-                ],
-                field
-            )
-            attrs[field_name]['type'] = 'char'
-        for field_name, related_info in fi.forward_relations.items():
-            related[field_name] = {
-                'type': related_info.related_model.__name__,
-            }
-            related_name = get_related_name(
-                related_info.related_model,
-                related_info.model_field
-            )
-            if related_name:
-                related[field_name]['relatedName'] = related_name
-            if related_info.to_many:
-                related[field_name]['many'] = True
-            related[field_name].update(
-                self.extract_options(
-                    [
-                        (('verbose_name', 'label'), None),
-                        (('read_only', 'readOnly'), False),
-                        ('required', False),
-                        ('blank', True),
-                        ('null', True),
-                        ('default', NOT_PROVIDED),
-                        ('choices', [])
-                    ],
-                    related_info.model_field
-                )
-            )
-        model_name = model.__name__
-        if model_name in processed_models:
-            raise TypeError(f'duplicate model name found: "{model_name}"')
-        processed_models[model_name] = {
-            'plural': names[0],
-            'attributes': attrs,
-            'relationships': related
+class SerializerMetadata(JSONAPIMetadata):
+    """ Generate JAM specialised metadata for serializers.
+
+    JAM is very similar to JSONAPIMetadata, but requires a few changes:
+      * Ignores all reverse relationships.
+      * Includes "relatedName" in forward relationships.
+      * M2M fields include a "many=true" value.
+      * Ignores "allows_include".
+      * Camelcases all option names.
+      * Splits results into attributes and relationships.
+    """
+    try:
+        reverse_relations = {
+            related.ReverseManyToOneDescriptor,
+            related.ReverseOneToOneDescriptor
+        }
+    except AttributeError:
+        reverse_relations = {
+            related.ReverseManyRelatedObjectsDescriptor,
+            related.ReverseSingleRelatedObjectDescriptor
         }
 
-    def extract_options(self, options, field):
-        opts = {}
-        for name in options:
+    def get_serializer_info(self, serializer):
+        info = super().get_serializer_info(serializer)
+        attributes = {}
+        relationships = {}
+        for name, field in info.items():
+            destination = attributes
+            new_field = {}
+            for attr_name, attr_value in field.items():
+                if attr_name == 'relationship_type':
+                    destination = relationships
+                    if attr_value == 'ManyToMany':
+                        new_field['many'] = True
+                elif attr_name == 'relationship_resource':
+                    new_field['type'] = attr_value
+                elif attr_name in {'allows_include'}:
+                    pass
+                else:
+                    new_field[inflection.camelize(attr_name, False)] = attr_value
+            if new_field.get('reverse'):
+                continue
+            if new_field['type'] == 'GenericField':
+                del new_field['type']
+            destination[name] = new_field
+        return {
+            'attributes': attributes,
+            'relationships': relationships
+        }
+
+    def get_field_info(self, field, field_name):
+        field_info = super().get_field_info(field, field_name)
+        serializer = field.parent
+        try:
+            serializer_model = getattr(serializer.Meta, 'model')
+            rel = getattr(serializer_model, field.field_name)
             try:
-                name, default = name
-            except:
-                default = None
-            try:
-                name, transformed = name
-            except:
-                transformed = name
-            if hasattr(field, name):
-                val = getattr(field, name)
-                if self.has_option(field, val, default):
-                    if callable(val):
-                        continue
+                rel_type = rel.__class__
+            except AttributeError:
+                pass
+            if rel_type in self.reverse_relations:
+                field_info['reverse'] = True
+            elif rel_type in self.relation_type_lookup.mapping:
+                rel_model = rel.field.target_field.model
+                rel_name = get_related_name(rel_model, rel.field)
+                if rel_name:
+                    field_info['relatedName'] = rel_name
+        except KeyError:
+            pass
+        except AttributeError:
+            pass
 
-                    # A bit yucky, but for choices we need to coerce it
-                    # to a list first in order to handle model_utils.Choices.
-                    if name == 'choices':
-                        val = [x for x in val]
+        # Fields from `SerializerRelationshipMethodField` don't really store
+        # whether they're ManyToMany or not. It seems, however, that they will
+        # have a member on the field called `child_relation`, which we can use
+        # to know if it's a many or not.
+        if 'relationship_type' not in field_info and getattr(field, 'child_relation', None):
+            field_info['relationship_type'] = 'ManyToMany'
 
-                    try:
-                        self.encoder.encode(val)
-                    except:
-                        continue
-                    opts[transformed] = val
-        return opts
+            # We also need to define a relationship resource.
+            # TODO: Currently just using the model name, but this should really
+            #   be a serializer.
+            field_info['relationship_resource'] = field._kwargs['model'].__name__
 
-    def has_option(self, field, value, default):
-        if not isinstance(default, tuple):
-            default = (default,)
-        for x in default:
-            if value == x:
-                return False
-        return True
+        return field_info
 
 
 class DRFGenerator(Generator):
@@ -145,93 +152,47 @@ class DRFGenerator(Generator):
         if prefix[-1] == '/':
             prefix = prefix[:-1]
         for name, vs, single in router.registry:
-            if name in getattr(settings, 'JAM_ENDPOINT_EXCLUDE', []):
+            logger.info(f'Working on endpoint: {name}')
+            if name in self.exclude_endpoints:
                 continue
             try:
                 model = vs.queryset.model
-            except:
+            except Exception:
                 continue
-            # attrs, related = {}, {}
-            # sc = vs.serializer_class()
-            # for field in sc._readable_fields:
-            #     self.process_field(field, model, attrs, related)
+            sc_class = vs.serializer_class
+            sc_name = sc_class.__name__
+            sc = sc_class()
+            if sc_name in self.exclude_serializers:
+                logger.info(f'  Excluding serializer: {sc_name}')
+                continue
+            logger.info(f'  Have serializer: {sc_name}')
+            meta = SerializerMetadata().get_serializer_info(sc)
+
             cur = api
             for part in prefix.split('/'):
                 cur = cur.setdefault(part, {})
-            cur[name] = 'CRUD'
-            if single in models:
-                raise Exception(f'need to add a name to viewset: {name}')
-            # models[single] = {
-            #     'plural': name,
-            #     'attributes': attrs,
-            #     'relattionships': related
-            # }
-            models[model] = [name, single]
+            parts = name.split('/')
+            for part in parts[:-1]:
+                cur = cur.setdefault(part, {})
+            cur[parts[-1]] = 'CRUD'
+            try:
+                # TODO: Get the resource name using JSON-API calls maybe?
+                res_name = sc.Meta.resource_name
+            except Exception:
+                res_name = model.__name__
+            if res_name in models:
+                if models[res_name]['serializer_class'] != sc_class:
+                    raise Exception(f'duplicate endpoints, need to add a resource name for: {name}')
+                logger.warning(f'Two endpoints share the same resource name and serializer: {res_name}')
+            logger.info(f'  Resource name: {res_name}')
+            models[res_name] = {
+                'plural': name,
+                'attributes': meta['attributes'],
+                'relationships': meta['relationships'],
+                'model': model,
+                'serializer_class': sc_class
+            }
         return api, models
-
-    def process_field(self, field, model, attrs, related):
-        if field.field_name in ['id']:
-            return
-        if isinstance(field, ResourceRelatedField):
-            self.process_relationship(field, model, related)
-        else:
-            self.process_attribute(field, attrs)
-
-    def process_attribute(self, field, attrs):
-        opt_names = [
-            'label',
-            ('read_only', False),
-            ('required', False),
-            ('allow_blank', True),
-            ('default', empty),
-            'max_length',
-            'choices'
-        ]
-        opts = {}
-        for name in opt_names:
-            try:
-                name, default = name
-            except:
-                default = None
-            if hasattr(field, name):
-                val = getattr(field, name)
-                if val != default:
-                    opts[name] = val
-        attrs[field.field_name] = opts
-
-    def process_relationship(self, field, model, related):
-        opt_names = [
-            'label',
-            ('read_only', False),
-            ('required', False),
-            ('allow_blank', True),
-            ('default', empty)
-        ]
-        opts = {}
-        for name in opt_names:
-            try:
-                name, default = name
-            except:
-                default = None
-            if hasattr(field, name):
-                val = getattr(field, name)
-                if val != default:
-                    opts[name] = val
-        fi = get_field_info(model)
-        for field_name, related_info in fi.forward_relations.items():
-            if field_name != field.field_name:
-                continue
-            break
-        opts['type'] = related_info.related_model.__name__
-        related_name = get_related_name(
-            related_info.related_model,
-            related_info.model_field
-        )
-        if related_name:
-            opts['relatedName'] = related_name
-        if related_info.to_many:
-            related['many'] = True
-        related[field.field_name] = opts
 
     def get_router(self, module_path):
         module_path = module_path or settings.ROOT_ROUTERCONF
