@@ -74,6 +74,9 @@ class SerializerMetadata(JSONAPIMetadata):
         attributes = {}
         relationships = {}
         for name, field in info.items():
+            # Don't worry about ID.
+            if name == 'id':
+                continue
             destination = attributes
             new_field = {}
             for attr_name, attr_value in field.items():
