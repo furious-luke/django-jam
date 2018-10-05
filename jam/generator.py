@@ -140,10 +140,8 @@ class SerializerMetadata(JSONAPIMetadata):
 class DRFGenerator(Generator):
     def model_in_included_apps(self, included_apps, model):
         if included_apps:
-            matched_apps = filter(lambda x: model.__module__[0:len(x)] == x, included_apps)
-            for match in matched_apps:
-                return True
-        return False
+            return model._meta.app_config.name in included_apps
+        return True
 
     def find_api_and_models(self, api_prefix=None, router_module=None, included_apps=None):
         """ Find all endpoints for models.
