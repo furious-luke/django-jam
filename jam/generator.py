@@ -25,7 +25,7 @@ class Generator:
         self.encoder = DjangoJSONEncoder()
 
     def generate(self, included_apps=[], **kwargs):
-        api, models = self.find_api_and_models(**kwargs)
+        api, models = self.find_api_and_models(included_apps=included_apps, **kwargs)
         processed_models = {}
         valid_models = []
         for cfg in apps.get_app_configs():
@@ -138,7 +138,14 @@ class SerializerMetadata(JSONAPIMetadata):
 
 
 class DRFGenerator(Generator):
-    def find_api_and_models(self, api_prefix=None, router_module=None):
+    def model_in_included_apps(self, included_apps, model):
+        if included_apps:
+            matched_apps = filter(lambda x: model.__module__[0:len(x)] == x, included_apps)
+            for match in matched_apps:
+                return True
+        return False
+
+    def find_api_and_models(self, api_prefix=None, router_module=None, included_apps=None):
         """ Find all endpoints for models.
 
         Skip any endpoints without a model, and warn if we find duplicate endpoints for
@@ -160,6 +167,8 @@ class DRFGenerator(Generator):
                 continue
             try:
                 model = vs.queryset.model
+                if not self.model_in_included_apps(included_apps, model):
+                    continue
             except Exception:
                 continue
             sc_class = vs.serializer_class
