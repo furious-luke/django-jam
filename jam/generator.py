@@ -162,7 +162,7 @@ class DRFGenerator(Generator):
         if prefix[-1] == '/':
             prefix = prefix[:-1]
         for name, vs, single in router.registry:
-            logger.info(f'Working on endpoint: {name}')
+            logger.debug(f'Working on endpoint: {name}')
             if name in self.exclude_endpoints:
                 continue
             try:
@@ -175,9 +175,9 @@ class DRFGenerator(Generator):
             sc_name = sc_class.__name__
             sc = sc_class()
             if sc_name in self.exclude_serializers:
-                logger.info(f'  Excluding serializer: {sc_name}')
+                logger.debug(f'  Excluding serializer: {sc_name}')
                 continue
-            logger.info(f'  Have serializer: {sc_name}')
+            logger.debug(f'  Have serializer: {sc_name}')
             meta = SerializerMetadata().get_serializer_info(sc)
 
             cur = api
@@ -196,7 +196,7 @@ class DRFGenerator(Generator):
                 if models[res_name]['serializer_class'] != sc_class:
                     raise Exception(f'duplicate endpoints, need to add a resource name for: {name}')
                 logger.warning(f'Two endpoints share the same resource name and serializer: {res_name}')
-            logger.info(f'  Resource name: {res_name}')
+            logger.debug(f'  Resource name: {res_name}')
             models[res_name] = {
                 'plural': name,
                 'attributes': meta['attributes'],
