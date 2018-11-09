@@ -25,7 +25,7 @@ class Command(BaseCommand):
             options['api_prefix'],
             exclude_serializers=options['exclude_serializers'],
             exclude_endpoints=options['exclude_endpoints']
-        ).generate()
+        ).generate(included_apps=options['apps'])
         api = TinyAPIExporter().export(schema)
         models = JAMExporter().export(schema)
         self.dump_api(api, options)

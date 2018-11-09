@@ -25,7 +25,7 @@ class Generator:
         self.encoder = DjangoJSONEncoder()
 
     def generate(self, included_apps=[], **kwargs):
-        api, models = self.find_api_and_models(**kwargs)
+        api, models = self.find_api_and_models(included_apps=included_apps, **kwargs)
         processed_models = {}
         valid_models = []
         for cfg in apps.get_app_configs():
@@ -138,7 +138,12 @@ class SerializerMetadata(JSONAPIMetadata):
 
 
 class DRFGenerator(Generator):
-    def find_api_and_models(self, api_prefix=None, router_module=None):
+    def model_in_included_apps(self, included_apps, model):
+        if included_apps:
+            return model._meta.app_config.name in included_apps
+        return True
+
+    def find_api_and_models(self, api_prefix=None, router_module=None, included_apps=None):
         """ Find all endpoints for models.
 
         Skip any endpoints without a model, and warn if we find duplicate endpoints for
@@ -155,20 +160,22 @@ class DRFGenerator(Generator):
         if prefix[-1] == '/':
             prefix = prefix[:-1]
         for name, vs, single in router.registry:
-            logger.info(f'Working on endpoint: {name}')
+            logger.debug(f'Working on endpoint: {name}')
             if name in self.exclude_endpoints:
                 continue
             try:
                 model = vs.queryset.model
+                if not self.model_in_included_apps(included_apps, model):
+                    continue
             except Exception:
                 continue
             sc_class = vs.serializer_class
             sc_name = sc_class.__name__
             sc = sc_class()
             if sc_name in self.exclude_serializers:
-                logger.info(f'  Excluding serializer: {sc_name}')
+                logger.debug(f'  Excluding serializer: {sc_name}')
                 continue
-            logger.info(f'  Have serializer: {sc_name}')
+            logger.debug(f'  Have serializer: {sc_name}')
             meta = SerializerMetadata().get_serializer_info(sc)
 
             cur = api
@@ -187,7 +194,7 @@ class DRFGenerator(Generator):
                 if models[res_name]['serializer_class'] != sc_class:
                     raise Exception(f'duplicate endpoints, need to add a resource name for: {name}')
                 logger.warning(f'Two endpoints share the same resource name and serializer: {res_name}')
-            logger.info(f'  Resource name: {res_name}')
+            logger.debug(f'  Resource name: {res_name}')
             models[res_name] = {
                 'plural': name,
                 'attributes': meta['attributes'],
