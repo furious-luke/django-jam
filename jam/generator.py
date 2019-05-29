@@ -1,13 +1,12 @@
 import logging
 
 import inflection
-from rest_framework_json_api.metadata import JSONAPIMetadata
-
 from django.apps import apps
 from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db.models.fields import related
 from django.utils.module_loading import import_string
+from rest_framework_json_api.metadata import JSONAPIMetadata
 
 from .utils import get_related_name
 
@@ -132,7 +131,15 @@ class SerializerMetadata(JSONAPIMetadata):
             # We also need to define a relationship resource.
             # TODO: Currently just using the model name, but this should really
             #   be a serializer.
-            field_info['relationship_resource'] = field._kwargs['model'].__name__
+            try:
+                field_info['relationship_resource'] = field._kwargs['model'].__name__
+            except KeyError as e:
+                # Get model from tracked fields using django-model-utils FieldTracker
+                if (
+                    'child_relation' in field._kwargs and
+                    hasattr(field._kwargs['child_relation'], 'queryset')
+                ):
+                    field_info['relationship_resource'] = field._kwargs['child_relation'].queryset.model.__name__
 
         return field_info
 
